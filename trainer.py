@@ -98,18 +98,37 @@ class VARTrainer(object):
         if self.first_prog: prog_wp = 1    # no prog warmup at first prog stage, as it's already solved in wp
         if prog_si == len(self.patch_nums) - 1: prog_si = -1    # max prog, as if no prog
         
+        
+        print("Train input", inp_B3HW.shape) # (4, 3, 48, 48)
+        print("Train label", label_B.shape) # [4]
+        
         # forward
         B, V = label_B.shape[0], self.vae_local.vocab_size
         self.var.require_backward_grad_sync = stepping
         
         gt_idx_Bl: List[ITen] = self.vae_local.img_to_idxBl(inp_B3HW)
         gt_BL = torch.cat(gt_idx_Bl, dim=1)
-        x_BLCv_wo_first_l: Ten = self.quantize_local.idxBl_to_var_input(gt_idx_Bl)
+        
+        print(gt_BL.shape) # [4, 5]; image token list
+        
+        x_BLCv_wo_first_l: Ten = self.quantize_local.idxBl_to_var_input(gt_idx_Bl) # [4, L - 1, 32]
         
         with self.var_opt.amp_ctx:
             self.var_wo_ddp.forward
+            
+            
+            
             logits_BLV = self.var(label_B, x_BLCv_wo_first_l)
+            
+            print("Var logits", logits_BLV.shape) # [4, L, 4096]
+            print("Var input labels", label_B.shape) # [4]
+            print("Var input tensor", x_BLCv_wo_first_l.shape) # [4, L - 1, 32]; 
+            print(x_BLCv_wo_first_l[0, 0])
+            print(label_B) # label
+            print(x_BLCv_wo_first_l.dtype) # float
+            
             loss = self.train_loss(logits_BLV.view(-1, V), gt_BL.view(-1)).view(B, -1)
+            # Cross entropy loss
             if prog_si >= 0:    # in progressive training
                 bg, ed = self.begin_ends[prog_si]
                 assert logits_BLV.shape[1] == gt_BL.shape[1] == ed

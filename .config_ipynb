@@ -1,0 +1,1 @@
+train.py --depth=16 --bs=48 --ep=200 --fp16=1 --alng=1e-3 --wpe=0.1 --data_path=/data/scratch-oc40/fxh/ImageNet --local_debug=True

@@ -141,8 +141,8 @@ def build_everything(args: arg_util.Args):
         rng = torch.Generator('cpu')
         rng.manual_seed(0)
         B = 4
-        inp = torch.rand(B, 3, args.data_load_reso, args.data_load_reso)
-        label = torch.ones(B, dtype=torch.long)
+        inp = torch.rand(B, 3, args.data_load_reso, args.data_load_reso).cuda()
+        label = torch.ones(B, dtype=torch.long).cuda()
         
         me = misc.MetricLogger(delimiter='  ')
         trainer.train_step(
@@ -277,6 +277,9 @@ def train_one_ep(ep: int, is_first_ep: bool, start_it: int, args: arg_util.Args,
         inp = inp.to(args.device, non_blocking=True)
         label = label.to(args.device, non_blocking=True)
         
+        print("!! Input shape", inp.shape)
+        print("!! label shape", label.shape)
+        
         args.cur_it = f'{it+1}/{iters_train}'
         
         wp_it = args.wp * iters_train
@@ -333,3 +336,17 @@ if __name__ == '__main__':
         dist.finalize()
         if isinstance(sys.stdout, misc.SyncPrint) and isinstance(sys.stderr, misc.SyncPrint):
             sys.stdout.close(), sys.stderr.close()
+
+'''
+torchrun --nproc_per_node=8 --nnodes=... --node_rank=... --master_addr=... --master_port=... train.py \
+  --depth=16 --bs=768 --ep=200 --fp16=1 --alng=1e-3 --wpe=0.1
+  
+  
+torchrun --nproc_per_node=8 train.py --nnodes=1 --node_rank=0 --master_addr=192.168.1.1 --master_port=12345 \
+  --depth=16 --bs=384 --ep=200 --fp16=1 --alng=1e-3 --wpe=0.1 --data_path=/data/scratch-oc40/fxh/ImageNet
+  
+python train.py --depth=16 --bs=384 --ep=200 --fp16=1 --alng=1e-3 --wpe=0.1 --data_path=/data/scratch-oc40/fxh/ImageNet
+
+python train.py --depth=16 --bs=384 --ep=200 --fp16=1 --alng=1e-3 --wpe=0.1 --data_path=/data/scratch-oc40/fxh/ImageNet --local_debug=True
+
+'''
