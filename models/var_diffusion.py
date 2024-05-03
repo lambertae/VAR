@@ -41,7 +41,7 @@ class Diffusion(nn.Module):
                 self.rdm = SimpleMLPAdaLN(
                     in_channels=self.channels,
                     model_channels=simplemlp_w,
-                    out_channels=self.channels,
+                    out_channels=self.channels * 2,
                     num_res_blocks=simplemlp_d,
                     context_channels=decoder_embed_dim,
                     cond_drop=cond_drop,
@@ -53,7 +53,7 @@ class Diffusion(nn.Module):
                     time_embed_dim=simplemlp_w,
                     model_channels=simplemlp_w,
                     bottleneck_channels=simplemlp_w,
-                    out_channels=self.channels,
+                    out_channels=self.channels * 2,
                     num_res_blocks=simplemlp_d,
                     dropout=0,
                     use_context=True,
@@ -82,15 +82,21 @@ class Diffusion(nn.Module):
         else:
             raise NotImplementedError
 
-    def forward_diffusion(self, z, cond, mask):
-        bsz, seq_len, _ = z.shape
+    def forward_diffusion(self, z, cond):
+        '''
+        Args:
+            z: (bsz, channels)
+            cond: (bsz, decoder_embed_dim)
+        Returns:
+            loss: torch.Tensor (bsz,)
+        '''
+        
+        assert (len(z.shape) == 2)
+        
+        bsz, _ = z.shape
+        seq_len = 1
         z = z.reshape(bsz*seq_len, -1)
         cond = cond.reshape(bsz*seq_len, -1)
-        mask = mask[:, self.buffer_size:].reshape(bsz*seq_len)
-
-        z = z.repeat(self.diffusion_batch_mul, 1)
-        cond = cond.repeat(self.diffusion_batch_mul, 1)
-        mask = mask.repeat(self.diffusion_batch_mul)
 
         if self.direct_pred:
             pred_z = self.cond_proj(cond)
@@ -98,12 +104,20 @@ class Diffusion(nn.Module):
         else:
             t = torch.randint(0, self.train_diffusion.num_timesteps, (bsz*seq_len*self.diffusion_batch_mul,)).cuda()
             model_kwargs = dict(c=cond)
+            
+            print("Train", z.shape, cond.shape)
             loss_dict = self.train_diffusion.training_losses(self.rdm, z, t, model_kwargs)
             loss = loss_dict["loss"]
-        loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
+        loss = loss.mean(-1)
         return loss
     
     def sampler(self, cond):
+        '''
+        Args:
+            cond: (bsz, decoder_embed_dim)
+        Returns:
+            sampled_token_latent: (bsz, channels)
+        '''
         z = torch.randn(cond.shape[0], self.channels).cuda()
         model_kwargs = dict(c=cond)
         sample_fn = self.rdm.forward
@@ -118,3 +132,44 @@ class Diffusion(nn.Module):
             )
         
         return sampled_token_latent
+    
+
+class QuantizedDiffusionHead(nn.Module):
+    def __init__(self, channels, vocab_size, diffusion_model: Diffusion):
+        super().__init__()
+        self.diffusion_model = diffusion_model
+        self.proj = nn.Linear(channels, vocab_size)
+    
+    def forward(self, cond):
+        '''
+        Args:
+            cond: (bsz, ..., decoder_embed_dim)
+        Returns:
+            logits: (bsz, ..., vocab_size)
+        '''
+        old_shape = cond.shape
+        z = self.diffusion_model.sampler(cond.reshape(-1, cond.shape[-1]))
+        logits = self.proj(z)
+        return logits.reshape(*old_shape[:-1], -1)
+
+    def loss(self, cond, token_id):
+        '''
+        Args:
+            cond: (bsz, ..., decoder_embed_dim)
+            token_id: (bsz, ...); int 
+        Returns:
+            loss: torch.Tensor (bsz, ...)
+        '''
+        # reshape
+        old_shape = cond.shape
+        
+        cond = cond.reshape(-1, cond.shape[-1])
+        token_id = token_id.reshape(-1)
+        
+        token_emb = self.proj.weight[token_id]
+        diffusion_loss = self.diffusion_model.forward_diffusion(token_emb, cond)
+        emb_logits = self.proj(token_emb)
+        reconstruction_loss = nn.functional.cross_entropy(emb_logits, token_id, reduction='none')
+        
+        total_loss = diffusion_loss + reconstruction_loss
+        return total_loss.reshape(*old_shape[:-1])

@@ -28,6 +28,9 @@ class VARTrainer(object):
         self.var, self.vae_local, self.quantize_local = var, vae_local, vae_local.quantize
         self.quantize_local: VectorQuantizer2
         self.var_wo_ddp: VAR = var_wo_ddp  # after torch.compile
+        
+        print("Quantize: ", self.quantize_local.quant_resi)
+        print("Quantize ratio", self.quantize_local.quant_resi_ratio)
         self.var_opt = var_opt
         
         del self.var_wo_ddp.rng
@@ -116,22 +119,28 @@ class VARTrainer(object):
         with self.var_opt.amp_ctx:
             self.var_wo_ddp.forward
             
+            # loss = self.var.loss(label_B, x_BLCv_wo_first_l, gt_BL)
+            logits_BLV = None
+            if self.var.module.use_diffusion_head:
+                cond = self.var(label_B, x_BLCv_wo_first_l, return_logits=False)
+                loss = self.var.module.head.loss(cond, gt_BL)
+            else:
+                logits_BLV = self.var(label_B, x_BLCv_wo_first_l)
+                print("Var logits", logits_BLV.shape) # [4, L, 4096]
+                loss = self.train_loss(logits_BLV.view(-1, V), gt_BL.view(-1)).view(B, -1)
+
+            print("!!!", loss.shape)
+            # print("Var input labels", label_B.shape) # [4]
+            # print("Var input tensor", x_BLCv_wo_first_l.shape) # [4, L - 1, 32]; 
+            # print(x_BLCv_wo_first_l[0, 0])
+            # print(label_B) # label
+            # print(x_BLCv_wo_first_l.dtype) # float
             
-            
-            logits_BLV = self.var(label_B, x_BLCv_wo_first_l)
-            
-            print("Var logits", logits_BLV.shape) # [4, L, 4096]
-            print("Var input labels", label_B.shape) # [4]
-            print("Var input tensor", x_BLCv_wo_first_l.shape) # [4, L - 1, 32]; 
-            print(x_BLCv_wo_first_l[0, 0])
-            print(label_B) # label
-            print(x_BLCv_wo_first_l.dtype) # float
-            
-            loss = self.train_loss(logits_BLV.view(-1, V), gt_BL.view(-1)).view(B, -1)
             # Cross entropy loss
             if prog_si >= 0:    # in progressive training
                 bg, ed = self.begin_ends[prog_si]
-                assert logits_BLV.shape[1] == gt_BL.shape[1] == ed
+                # assert logits_BLV.shape[1] == gt_BL.shape[1] == ed
+                assert gt_BL.shape[1] == ed
                 lw = self.loss_weight[:, :ed].clone()
                 lw[:, bg:ed] *= min(max(prog_wp, 0), 1)
             else:               # not in progressive training
@@ -142,8 +151,12 @@ class VARTrainer(object):
         grad_norm, scale_log2 = self.var_opt.backward_clip_step(loss=loss, stepping=stepping)
         
         # log
-        pred_BL = logits_BLV.data.argmax(dim=-1)
         if it == 0 or it in metric_lg.log_iters:
+            
+            if logits_BLV is None: # Hack for diffusion head
+                logits_BLV = self.var.module.head(cond)
+                
+            pred_BL = logits_BLV.data.argmax(dim=-1)
             Lmean = self.val_loss(logits_BLV.data.view(-1, V), gt_BL.view(-1)).item()
             acc_mean = (pred_BL == gt_BL).float().mean().item() * 100
             if prog_si >= 0:    # in progressive training
@@ -156,6 +169,10 @@ class VARTrainer(object):
         
         # log to tensorboard
         if g_it == 0 or (g_it + 1) % 500 == 0:
+            
+            if logits_BLV is None: # Hack for diffusion head
+                logits_BLV = self.var.module.head(cond)
+            
             prob_per_class_is_chosen = pred_BL.view(-1).bincount(minlength=V).float()
             dist.allreduce(prob_per_class_is_chosen)
             prob_per_class_is_chosen /= prob_per_class_is_chosen.sum()

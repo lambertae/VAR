@@ -10,6 +10,7 @@ import dist
 from models.basic_var import AdaLNBeforeHead, AdaLNSelfAttn
 from models.helpers import gumbel_softmax_with_rng, sample_with_top_k_top_p_
 from models.vqvae import VQVAE, VectorQuantizer2
+from models.var_diffusion import QuantizedDiffusionHead
 
 
 class SharedAdaLin(nn.Linear):
@@ -26,6 +27,7 @@ class VAR(nn.Module):
         attn_l2_norm=False,
         patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16),   # 10 steps by default
         flash_if_available=True, fused_if_available=True,
+        diffusion_head: None | QuantizedDiffusionHead = None,
     ):
         super().__init__()
         # 0. hyperparameters
@@ -113,7 +115,12 @@ class VAR(nn.Module):
         
         # 6. classifier head
         self.head_nm = AdaLNBeforeHead(self.C, self.D, norm_layer=norm_layer)
-        self.head = nn.Linear(self.C, self.V)
+        if diffusion_head is not None:
+            self.head = diffusion_head
+            self.use_diffusion_head = True
+        else:
+            self.head = nn.Linear(self.C, self.V)
+            self.use_diffusion_head = False
     
     def get_logits(self, h_or_h_and_residual: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], cond_BD: Optional[torch.Tensor]):
         if not isinstance(h_or_h_and_residual, torch.Tensor):
@@ -288,6 +295,7 @@ class VAR(nn.Module):
             elif hasattr(sab, 'ada_gss'):
                 sab.ada_gss.data[:, :, 2:].mul_(init_adaln)
                 sab.ada_gss.data[:, :, :2].mul_(init_adaln_gamma)
+
     
     def extra_repr(self):
         return f'drop_path_rate={self.drop_path_rate:g}'

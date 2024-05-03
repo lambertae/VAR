@@ -15,6 +15,8 @@ from utils.data import build_dataset
 from utils.data_sampler import DistInfiniteBatchSampler, EvalDistributedSampler
 from utils.misc import auto_resume
 
+from models.var_diffusion import QuantizedDiffusionHead, Diffusion
+
 
 def build_everything(args: arg_util.Args):
     # resume
@@ -82,13 +84,24 @@ def build_everything(args: arg_util.Args):
     from utils.amp_sc import AmpOptimizer
     from utils.lr_control import filter_params
     
+    diffusion_head = None
+    
+    diffusion_head = QuantizedDiffusionHead(channels = 32, vocab_size = 4096, 
+                                                diffusion_model=Diffusion(
+                                                decoder_embed_dim=1024), 
+                                            )
+
+    print("!! Diffusion head", diffusion_head)
+    
     vae_local, var_wo_ddp = build_vae_var(
         V=4096, Cvae=32, ch=160, share_quant_resi=4,        # hard-coded VQVAE hyperparameters
         device=dist.get_device(), patch_nums=args.patch_nums,
         num_classes=num_classes, depth=args.depth, shared_aln=args.saln, attn_l2_norm=args.anorm,
         flash_if_available=args.fuse, fused_if_available=args.fuse,
         init_adaln=args.aln, init_adaln_gamma=args.alng, init_head=args.hd, init_std=args.ini,
+        diffusion_head=diffusion_head
     )
+    
     
     vae_ckpt = 'vae_ch160v4096z32.pth'
     if dist.is_local_master():
@@ -96,6 +109,9 @@ def build_everything(args: arg_util.Args):
             os.system(f'wget https://huggingface.co/FoundationVision/var/resolve/main/{vae_ckpt}')
     dist.barrier()
     vae_local.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=True)
+    
+    print("ZNORM", vae_local.quantize.using_znorm)
+    print(vae_local.quantize.embedding.weight.data.shape)
     
     vae_local: VQVAE = args.compile_model(vae_local, args.vfast)
     var_wo_ddp: VAR = args.compile_model(var_wo_ddp, args.tfast)
