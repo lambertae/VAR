@@ -86,9 +86,9 @@ def build_everything(args: arg_util.Args):
     
     diffusion_head = None
     
-    diffusion_head = QuantizedDiffusionHead(channels = 32, vocab_size = 4096, 
-                                                diffusion_model=Diffusion(
+    diffusion_head = QuantizedDiffusionHead(diffusion_model=Diffusion(
                                                 decoder_embed_dim=1024), 
+                                                embedding=torch.nn.Embedding(1, 1)
                                             )
 
     print("!! Diffusion head", diffusion_head)
@@ -112,6 +112,9 @@ def build_everything(args: arg_util.Args):
     
     print("ZNORM", vae_local.quantize.using_znorm)
     print(vae_local.quantize.embedding.weight.data.shape)
+    
+    diffusion_head.update_embedding(vae_local.quantize.embedding)
+    print("UPDATE VAE", var_wo_ddp.head.embedding_mat.shape)
     
     vae_local: VQVAE = args.compile_model(vae_local, args.vfast)
     var_wo_ddp: VAR = args.compile_model(var_wo_ddp, args.tfast)

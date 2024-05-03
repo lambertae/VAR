@@ -108,7 +108,6 @@ class Diffusion(nn.Module):
             print("Train", z.shape, cond.shape)
             loss_dict = self.train_diffusion.training_losses(self.rdm, z, t, model_kwargs)
             loss = loss_dict["loss"]
-        loss = loss.mean(-1)
         return loss
     
     def sampler(self, cond):
@@ -135,10 +134,13 @@ class Diffusion(nn.Module):
     
 
 class QuantizedDiffusionHead(nn.Module):
-    def __init__(self, channels, vocab_size, diffusion_model: Diffusion):
+    def __init__(self, diffusion_model: Diffusion, embedding: nn.Embedding):
         super().__init__()
         self.diffusion_model = diffusion_model
-        self.proj = nn.Linear(channels, vocab_size)
+        self.embedding_mat = embedding.weight.data.clone().detach()
+    
+    def update_embedding(self, embedding):
+        self.embedding_mat = embedding.weight.data.clone().detach()
     
     def forward(self, cond):
         '''
@@ -148,8 +150,13 @@ class QuantizedDiffusionHead(nn.Module):
             logits: (bsz, ..., vocab_size)
         '''
         old_shape = cond.shape
-        z = self.diffusion_model.sampler(cond.reshape(-1, cond.shape[-1]))
-        logits = self.proj(z)
+        z = self.diffusion_model.sampler(cond.reshape(-1, cond.shape[-1])) # (bsz*..., channels)
+        v = self.embedding_mat
+        dist = torch.sum(z * z, dim=1, keepdim=True) + torch.sum(v * v, dim=1, keepdim=False)
+        dist.addmm_(z, v.T, alpha=-2, beta=1)  # (B*h*w, vocab_size)
+        idx_N = torch.argmin(dist, dim=1)
+        logits = torch.zeros(z.shape[0], v.shape[0]).cuda()
+        logits[torch.arange(z.shape[0]), idx_N] = 1.0
         return logits.reshape(*old_shape[:-1], -1)
 
     def loss(self, cond, token_id):
@@ -166,10 +173,10 @@ class QuantizedDiffusionHead(nn.Module):
         cond = cond.reshape(-1, cond.shape[-1])
         token_id = token_id.reshape(-1)
         
-        token_emb = self.proj.weight[token_id]
+        token_emb = self.embedding_mat[token_id]
+        print("Token emb", token_emb.shape, cond.shape)
         diffusion_loss = self.diffusion_model.forward_diffusion(token_emb, cond)
-        emb_logits = self.proj(token_emb)
-        reconstruction_loss = nn.functional.cross_entropy(emb_logits, token_id, reduction='none')
         
-        total_loss = diffusion_loss + reconstruction_loss
-        return total_loss.reshape(*old_shape[:-1])
+        print("Diffusion loss", diffusion_loss.shape)
+        
+        return diffusion_loss.reshape(*old_shape[:-1])
